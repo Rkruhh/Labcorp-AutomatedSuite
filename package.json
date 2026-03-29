@@ -1,0 +1,19 @@
+{
+  "name": "labcorp-automatedsuite",
+  "version": "1.0.0",
+  "description": "Playwright end-to-end test suite for the Labcorp Patient Portal",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "report": "npx playwright show-report"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@axe-core/playwright": "^4.11.1",
+    "@playwright/test": "^1.58.2"
+  }
+}
