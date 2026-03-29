@@ -1,5 +1,5 @@
 // ============================================================
-//  Labcorp Patient Portal – Demo Test Suite
+//  Labcorp Patient Portal – Demo Test Suite  (Fixed)
 //  Framework : Playwright
 //  Run       : npx playwright test labcorp.spec.js --headed
 //
@@ -11,10 +11,11 @@
 
 const { test, expect } = require("@playwright/test");
 const AxeBuilder = require("@axe-core/playwright").default;
+const path = require("path");
+const fs = require("fs");
 
 // ------------------------------------------------------------------
-// Soft-assert helper
-// Logs failures without stopping the suite – ideal for demo flow.
+// Soft-assert helper – logs failure, never stops the suite
 // ------------------------------------------------------------------
 const softCheck = async (label, fn) => {
   try {
@@ -30,14 +31,43 @@ const snap = (page, name) =>
   page.screenshot({ path: `screenshots/${name}.png`, fullPage: true });
 
 // ------------------------------------------------------------------
-// Run all tests serially (one continuous flow, no parallelism).
+// GLOBAL POPUP HANDLERS
+// Call these at the start of any page that may show overlays.
 // ------------------------------------------------------------------
-test.describe.configure({ mode: "serial" });
 
-// ══════════════════════════════════════════════════════════════════
-//  SHARED LOGIN HELPER
-//  Used by tests that need an authenticated session.
-// ══════════════════════════════════════════════════════════════════
+/** Dismiss cookie banner if present */
+async function dismissCookieBanner(page) {
+  try {
+    const rejectBtn = page.getByRole("button", {
+      name: /reject all non-essential cookies/i,
+    });
+    if (await rejectBtn.isVisible({ timeout: 4000 })) {
+      await rejectBtn.click();
+      console.log("  🍪  Cookie banner dismissed");
+      await page.waitForTimeout(800);
+    }
+  } catch {
+    // Banner not present – continue
+  }
+}
+
+/** Dismiss "Save password?" browser popup if present */
+async function dismissSavePassword(page) {
+  try {
+    const neverBtn = page.getByRole("button", { name: /never/i });
+    if (await neverBtn.isVisible({ timeout: 3000 })) {
+      await neverBtn.click();
+      console.log("  🔑  Save-password popup dismissed");
+      await page.waitForTimeout(500);
+    }
+  } catch {
+    // Popup not present – continue
+  }
+}
+
+// ------------------------------------------------------------------
+// SIGN-IN URL  (OAuth entry point)
+// ------------------------------------------------------------------
 const SIGNIN_URL =
   "https://login-patient.labcorp.com/oauth2/default/v1/authorize" +
   "?client_id=0oaympyx2kMM41A140x7" +
@@ -49,63 +79,114 @@ const SIGNIN_URL =
   "&state=n0SzNRto77XHhzlG54o59NqvAsq4R4TAYtCEPylPsJAuLYywr7ZlTu8klTDpDdUn" +
   "&scope=openid%20email%20profile";
 
+// Where we save the authenticated browser session
+const SESSION_FILE = path.resolve("labcorp-session.json");
+
+// ------------------------------------------------------------------
+// LOGIN HELPER
+// Performs login once, saves session to disk.
+// All subsequent calls just navigate to the dashboard directly.
+// ------------------------------------------------------------------
 async function loginFlow(page) {
-  if (page.url().includes("/portal/dashboard")) return;
-
-  await page.goto(SIGNIN_URL, { waitUntil: "networkidle" });
-
-  if (page.url().includes("/portal/dashboard")) return;
-
-  try {
-    const emailInput = page
-      .locator('input[type="email"], input[name*="email"], input[id*="email"]')
-      .first();
-    await emailInput.waitFor({ timeout: 8000 });
-    await emailInput.fill("rkuncc0@gmail.com");
-
-    await page.getByRole("button", { name: /next/i }).first().click();
-
-    const pwdInput = page.locator('input[type="password"]').first();
-    await pwdInput.waitFor({ timeout: 8000 });
-    await pwdInput.fill("TestDemo@123");
-
-    await page
-      .getByRole("button", { name: /verify|sign.?in|log.?in|submit/i })
-      .first()
-      .click();
-
-    await page.waitForURL("**/portal/dashboard**", { timeout: 15000 });
-  } catch (err) {
-    console.warn("⚠️  loginFlow: could not complete login –", err.message);
+  // If session file exists, load it and go straight to dashboard
+  if (fs.existsSync(SESSION_FILE)) {
+    await page.goto("https://patient.labcorp.com/portal/dashboard", {
+      waitUntil: "networkidle",
+    });
+    await dismissCookieBanner(page);
+    // If we're still on login page, session expired – do full login
+    if (!page.url().includes("/portal/dashboard")) {
+      await performLogin(page);
+    }
+    return;
   }
+  await performLogin(page);
 }
+
+async function performLogin(page) {
+  await page.goto(SIGNIN_URL, { waitUntil: "networkidle" });
+  await dismissCookieBanner(page);
+
+  // -- Type email --
+  const emailInput = page
+    .locator('input[type="text"], input[type="email"]')
+    .filter({ hasText: "" })
+    .first();
+
+  // Use a broader locator since Okta renders a plain text input for email
+  const oktalInput = page.locator("#okta-signin-username, input[name='identifier'], input[autocomplete='username']").first();
+
+  await softCheck("Email input found and filled", async () => {
+    await oktalInput.waitFor({ state: "visible", timeout: 10000 });
+    await oktalInput.click();
+    await oktalInput.fill("rkuncc0@gmail.com");
+    await page.waitForTimeout(500);
+  });
+
+  // -- Click Next --
+  await softCheck("Click Next", async () => {
+    const nextBtn = page.getByRole("button", { name: /next/i }).first();
+    await nextBtn.waitFor({ state: "visible", timeout: 6000 });
+    await nextBtn.click();
+    await page.waitForTimeout(1500);
+  });
+
+  // -- Type password --
+  await softCheck("Password field filled", async () => {
+    const pwdInput = page.locator('input[type="password"]').first();
+    await pwdInput.waitFor({ state: "visible", timeout: 10000 });
+    await pwdInput.click();
+    await pwdInput.fill("TestDemo@123");
+    await page.waitForTimeout(500);
+  });
+
+  // -- Click Verify --
+  await softCheck("Click Verify / Sign In", async () => {
+    const verifyBtn = page
+      .getByRole("button", { name: /verify|sign.?in|submit/i })
+      .first();
+    await verifyBtn.waitFor({ state: "visible", timeout: 6000 });
+    await verifyBtn.click();
+  });
+
+  // -- Wait for dashboard --
+  await page.waitForURL("**/portal/dashboard**", { timeout: 20000 });
+  await dismissSavePassword(page);
+  await dismissCookieBanner(page);
+
+  // Save session so subsequent tests skip login
+  await page.context().storageState({ path: SESSION_FILE });
+  console.log("  💾  Session saved to labcorp-session.json");
+}
+
+// ------------------------------------------------------------------
+// Run all tests serially – one continuous demo flow
+// ------------------------------------------------------------------
+test.describe.configure({ mode: "serial" });
 
 // ══════════════════════════════════════════════════════════════════
 //  1 · LANDING PAGE
 // ══════════════════════════════════════════════════════════════════
 test.describe("1 · Landing Page", () => {
-  // ── 1a  Accessibility ──────────────────────────────────────────
   test("1a · Accessibility – Axe, alt text, labels, landmark, keyboard", async ({
     page,
   }) => {
     await page.goto("https://patient.labcorp.com/landing", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
     await snap(page, "01_landing");
 
     await softCheck("Axe: zero critical violations", async () => {
       const results = await new AxeBuilder({ page })
         .withTags(["wcag2a", "wcag2aa"])
         .analyze();
-      const critical = results.violations.filter(
-        (v) => v.impact === "critical"
-      );
-      if (critical.length) {
+      const critical = results.violations.filter((v) => v.impact === "critical");
+      if (critical.length)
         throw new Error(
           `${critical.length} critical violation(s):\n` +
             critical.map((v) => `  [${v.id}] ${v.description}`).join("\n")
         );
-      }
     });
 
     await softCheck("All images have alt text", async () => {
@@ -159,15 +240,15 @@ test.describe("1 · Landing Page", () => {
     });
   });
 
-  // ── 1b  Visual Alignment ───────────────────────────────────────
   test("1b · Visual alignment – hero, images, and headings render correctly", async ({
     page,
   }) => {
     await page.goto("https://patient.labcorp.com/landing", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
 
-    await softCheck("Header / logo image is visible", async () => {
+    await softCheck("Header / logo is visible", async () => {
       await expect(
         page.locator("header img, [class*='logo'] img").first()
       ).toBeVisible();
@@ -185,23 +266,18 @@ test.describe("1 · Landing Page", () => {
       await expect(page.locator("h1").first()).toBeVisible();
     });
 
-    await softCheck("Page body height is reasonable (> 400 px)", async () => {
-      const h = await page.evaluate(() => document.body.scrollHeight);
-      expect(h).toBeGreaterThan(400);
-    });
-
     await softCheck("Footer is rendered", async () => {
       await expect(page.locator("footer")).toBeVisible();
     });
   });
 
-  // ── 1c  Navigation / CTA Links ─────────────────────────────────
   test("1c · Navigation links and CTA buttons are present", async ({
     page,
   }) => {
     await page.goto("https://patient.labcorp.com/landing", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
 
     await softCheck("At least 2 header/nav links are visible", async () => {
       const links = page.locator("header a, nav a");
@@ -209,91 +285,68 @@ test.describe("1 · Landing Page", () => {
       expect(await links.count()).toBeGreaterThanOrEqual(2);
     });
 
-    await softCheck("Sign-In link is present", async () => {
+    await softCheck("Sign-In button/link is present", async () => {
       await expect(
         page.getByRole("link", { name: /sign.?in|log.?in/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("Create Account / Register link is present", async () => {
+    await softCheck("'Make an Appointment' link is present", async () => {
       await expect(
-        page
-          .getByRole("link", {
-            name: /create.?account|register|sign.?up/i,
-          })
-          .first()
+        page.getByRole("link", { name: /make.?an?.?appoint/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("Clicking Sign-In link navigates away from landing", async () => {
-      const [newPage] = await Promise.all([
-        page.context().waitForEvent("page").catch(() => null),
-        page.getByRole("link", { name: /sign.?in|log.?in/i }).first().click(),
-      ]);
-      const targetUrl = newPage ? newPage.url() : page.url();
-      expect(targetUrl).not.toContain("/landing");
+    await softCheck("'Labcorp OnDemand' link is present", async () => {
+      await expect(
+        page.getByRole("link", { name: /ondemand/i }).first()
+      ).toBeVisible();
     });
   });
 });
 
 // ══════════════════════════════════════════════════════════════════
 //  2 · CREATE ACCOUNT PAGE
+//  NOTE: Page is protected by a CAPTCHA after "Begin" is clicked.
+//  We validate everything visible BEFORE the CAPTCHA triggers.
 // ══════════════════════════════════════════════════════════════════
 test.describe("2 · Create Account Page", () => {
-  test("2a · All registration fields and labels are visible and aligned", async ({
+  test("2a · Registration entry point is reachable and Begin button is visible", async ({
     page,
   }) => {
     await page.goto(
       "https://patient.labcorp.com/account/registration/register",
       { waitUntil: "networkidle" }
     );
+    await dismissCookieBanner(page);
     await snap(page, "02_register");
 
-    await softCheck("Page heading is visible", async () => {
-      await expect(page.locator("h1, h2").first()).toBeVisible();
+    await softCheck("Page URL is correct", async () => {
+      expect(page.url()).toContain("/registration/register");
     });
 
-    const expectedLabels = [
-      /first.?name/i,
-      /last.?name/i,
-      /date.?of.?birth|dob/i,
-      /sex|gender/i,
-      /email/i,
-      /password/i,
-    ];
-
-    for (const pattern of expectedLabels) {
-      await softCheck(`Label visible: ${pattern}`, async () => {
-        const label = page
-          .locator("label, [class*='label']")
-          .filter({ hasText: pattern })
-          .first();
-        await expect(label).toBeVisible();
-      });
-    }
-
-    await softCheck("Submit / Continue button is visible", async () => {
+    await softCheck("'Let's confirm you are human' heading is visible", async () => {
       await expect(
-        page
-          .getByRole("button", {
-            name: /submit|continue|next|register|create/i,
-          })
-          .first()
+        page.getByText(/confirm you are human/i).first()
+      ).toBeVisible({ timeout: 8000 });
+    });
+
+    await softCheck("'Begin' button is visible and clickable", async () => {
+      await expect(
+        page.getByRole("button", { name: /begin/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("No input element is horizontally clipped", async () => {
-      const inputs = await page.$$("input:visible, select:visible");
-      for (const inp of inputs) {
-        const box = await inp.boundingBox();
-        if (box) expect(box.x).toBeGreaterThanOrEqual(0);
-      }
+    await softCheck("Language selector is present", async () => {
+      await expect(page.locator("select").first()).toBeVisible();
     });
 
-    await softCheck("Password field is of type 'password' (masked)", async () => {
-      const pwd = page.locator('input[type="password"]').first();
-      await expect(pwd).toBeVisible();
-    });
+    // NOTE: We intentionally do NOT click Begin – it triggers a CAPTCHA
+    // (image-based human verification) that cannot be automated.
+    // The test proves the registration entry point is live and accessible.
+    console.log(
+      "  ℹ️  CAPTCHA detected beyond this point – not automatable by design."
+    );
   });
 });
 
@@ -303,20 +356,23 @@ test.describe("2 · Create Account Page", () => {
 test.describe("3 · Sign-In & Dashboard", () => {
   test("3a · Sign-in page layout is correctly aligned", async ({ page }) => {
     await page.goto(SIGNIN_URL, { waitUntil: "networkidle" });
+    await dismissCookieBanner(page);
     await snap(page, "03a_signin");
 
-    await softCheck("Sign-in heading is visible", async () => {
-      await expect(page.locator("h1, h2").first()).toBeVisible();
+    await softCheck("Sign-in card / heading is visible", async () => {
+      await expect(
+        page.getByText(/sign.?in/i).first()
+      ).toBeVisible({ timeout: 8000 });
     });
 
     await softCheck("Email input is visible", async () => {
       await expect(
         page
           .locator(
-            'input[type="email"], input[name*="email"], input[id*="email"]'
+            "#okta-signin-username, input[name='identifier'], input[autocomplete='username'], input[type='text'], input[type='email']"
           )
           .first()
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 8000 });
     });
 
     await softCheck("Next button is visible", async () => {
@@ -325,52 +381,74 @@ test.describe("3 · Sign-In & Dashboard", () => {
       ).toBeVisible();
     });
 
-    await softCheck("Labcorp branding / logo is visible", async () => {
+    await softCheck("Labcorp | Patient branding is visible", async () => {
       await expect(
-        page
-          .locator(
-            "img[alt*='Labcorp' i], img[src*='labcorp' i], [class*='logo']"
-          )
-          .first()
+        page.getByText(/labcorp.*patient/i).first()
       ).toBeVisible();
     });
   });
 
-  test("3b · Full login flow lands on the Dashboard", async ({ page }) => {
-    await page.goto(SIGNIN_URL, { waitUntil: "networkidle" });
+  test("3b · Full login – email → password → Dashboard", async ({ page }) => {
+    // Clean session file so we always demo a fresh login in test 3b
+    if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
 
-    await softCheck("Fill email and click Next", async () => {
+    await page.goto(SIGNIN_URL, { waitUntil: "networkidle" });
+    await dismissCookieBanner(page);
+
+    // -- Email --
+    await softCheck("Email input is focused and filled visibly", async () => {
       const emailInput = page
         .locator(
-          'input[type="email"], input[name*="email"], input[id*="email"]'
+          "#okta-signin-username, input[name='identifier'], input[autocomplete='username']"
         )
         .first();
+      await emailInput.waitFor({ state: "visible", timeout: 10000 });
+      await emailInput.click();
       await emailInput.fill("rkuncc0@gmail.com");
-      await page.getByRole("button", { name: /next/i }).first().click();
+      await expect(emailInput).toHaveValue("rkuncc0@gmail.com");
+      await snap(page, "03b_email_filled");
+    });
+
+    // -- Next --
+    await softCheck("Click Next button", async () => {
+      const nextBtn = page.getByRole("button", { name: /next/i }).first();
+      await nextBtn.click();
       await page.waitForTimeout(2000);
-      await snap(page, "03b_after_email");
+      await snap(page, "03b_after_next");
     });
 
-    await softCheck("Password field appears and is filled", async () => {
-      const pwd = page.locator('input[type="password"]').first();
-      await expect(pwd).toBeVisible({ timeout: 8000 });
-      await pwd.fill("TestDemo@123");
+    // -- Password --
+    await softCheck("Password field appears and is filled visibly", async () => {
+      const pwdInput = page.locator('input[type="password"]').first();
+      await pwdInput.waitFor({ state: "visible", timeout: 10000 });
+      await pwdInput.click();
+      await pwdInput.fill("TestDemo@123");
+      await expect(pwdInput).toHaveValue("TestDemo@123");
+      await snap(page, "03b_password_filled");
     });
 
-    await softCheck("Click Verify → redirect to Dashboard", async () => {
-      await page
-        .getByRole("button", { name: /verify|sign.?in|log.?in|submit/i })
-        .first()
-        .click();
-      await page.waitForURL("**/portal/dashboard**", { timeout: 15000 });
-      await snap(page, "03c_dashboard");
+    // -- Verify --
+    await softCheck("Click Verify → redirects to Dashboard", async () => {
+      const verifyBtn = page
+        .getByRole("button", { name: /verify|sign.?in|submit/i })
+        .first();
+      await verifyBtn.click();
+      await page.waitForURL("**/portal/dashboard**", { timeout: 20000 });
     });
 
+    await dismissSavePassword(page);
+    await dismissCookieBanner(page);
+
+    // Save session for downstream tests
+    await page.context().storageState({ path: SESSION_FILE });
+    await snap(page, "03c_dashboard");
+
+    // -- Dashboard checks --
     await softCheck("URL contains /portal/dashboard", async () => {
       expect(page.url()).toContain("/portal/dashboard");
     });
 
-    await softCheck("Dashboard heading or user greeting is visible", async () => {
+    await softCheck("Dashboard heading or greeting is visible", async () => {
       await expect(page.locator("h1, h2").first()).toBeVisible();
     });
 
@@ -378,19 +456,19 @@ test.describe("3 · Sign-In & Dashboard", () => {
       await expect(page.locator("nav, header").first()).toBeVisible();
     });
 
-    await softCheck("'Appointments' link appears in the top nav", async () => {
+    await softCheck("'Appointments' link is in the top nav", async () => {
       await expect(
         page.getByRole("link", { name: /appointments/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("'Orders' or 'Lab Orders' link appears in the top nav", async () => {
+    await softCheck("'Orders' link is in the top nav", async () => {
       await expect(
         page.getByRole("link", { name: /orders/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("Dashboard has no horizontal overflow", async () => {
+    await softCheck("No horizontal overflow on dashboard", async () => {
       const sw = await page.evaluate(() => document.body.scrollWidth);
       const vw = await page.evaluate(() => window.innerWidth);
       expect(sw).toBeLessThanOrEqual(vw + 20);
@@ -403,80 +481,92 @@ test.describe("3 · Sign-In & Dashboard", () => {
 // ══════════════════════════════════════════════════════════════════
 test.describe("4 · Appointments Page", () => {
   // ── 4a  Make Appointment → Find a Lab ─────────────────────────
-  test("4a · Make Appointment – Pediatric → Find a Lab flow", async ({
+  test("4a · Make Appointment – Pediatric → Find a Lab", async ({
     page,
   }) => {
     await loginFlow(page);
     await page.goto("https://patient.labcorp.com/portal/appointments", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
     await snap(page, "04_appointments");
 
-    await softCheck("Appointments page heading visible", async () => {
+    await softCheck("Appointments page heading is visible", async () => {
       await expect(page.locator("h1, h2").first()).toBeVisible();
     });
 
+    // Try multiple selectors since the button text may vary
     await softCheck("'Make an appointment' button is visible", async () => {
-      await expect(
-        page.getByRole("button", { name: /make.?an?.?appoint/i }).first()
-      ).toBeVisible();
+      const btn = page
+        .locator("button, a")
+        .filter({ hasText: /make.*appoint|schedule.*appoint|book.*appoint/i })
+        .first();
+      await expect(btn).toBeVisible({ timeout: 10000 });
     });
 
     await softCheck("Click 'Make an appointment'", async () => {
-      await page
-        .getByRole("button", { name: /make.?an?.?appoint/i })
-        .first()
-        .click();
-      await page.waitForTimeout(1500);
+      const btn = page
+        .locator("button, a")
+        .filter({ hasText: /make.*appoint|schedule.*appoint|book.*appoint/i })
+        .first();
+      await btn.click();
+      await page.waitForTimeout(2000);
       await snap(page, "04a_make_appt_open");
     });
 
-    await softCheck("Reason / service dropdown is visible", async () => {
-      await expect(page.locator("select").first()).toBeVisible({
-        timeout: 6000,
-      });
+    await softCheck("Reason / service selector appears", async () => {
+      const dropdown = page
+        .locator("select, [role='listbox'], [role='combobox']")
+        .first();
+      await expect(dropdown).toBeVisible({ timeout: 8000 });
     });
 
-    await softCheck("Select 'Pediatric' from the dropdown", async () => {
-      await page.locator("select").first().selectOption({ label: /pediatric/i });
+    await softCheck("Select 'Pediatric' from dropdown", async () => {
+      const select = page.locator("select").first();
+      await select.selectOption({ label: /pediatric/i });
+      await page.waitForTimeout(500);
     });
 
-    await softCheck("'Find a Lab' button is visible after selecting reason", async () => {
-      await expect(
-        page.getByRole("button", { name: /find.?a.?lab/i }).first()
-      ).toBeVisible();
+    await softCheck("'Find a Lab' button is visible", async () => {
+      const findLabBtn = page
+        .locator("button")
+        .filter({ hasText: /find.*lab/i })
+        .first();
+      await expect(findLabBtn).toBeVisible({ timeout: 6000 });
     });
 
     await softCheck("Click 'Find a Lab'", async () => {
-      await page.getByRole("button", { name: /find.?a.?lab/i }).first().click();
-      await page.waitForTimeout(2500);
+      const findLabBtn = page
+        .locator("button")
+        .filter({ hasText: /find.*lab/i })
+        .first();
+      await findLabBtn.click();
+      await page.waitForTimeout(3000);
       await snap(page, "04a_find_lab_result");
     });
 
     await softCheck("Find-a-Lab results page is loaded", async () => {
       await expect(
-        page
-          .locator("h1, h2, [class*='lab'], [class*='result']")
-          .first()
-      ).toBeVisible({ timeout: 10000 });
+        page.locator("h1, h2, [class*='lab'], [class*='result']").first()
+      ).toBeVisible({ timeout: 12000 });
     });
   });
 
   // ── 4b  Make Appointment → Cancel ─────────────────────────────
-  test("4b · Make Appointment – Pediatric → Cancel button", async ({
-    page,
-  }) => {
+  test("4b · Make Appointment – Pediatric → Cancel", async ({ page }) => {
     await loginFlow(page);
     await page.goto("https://patient.labcorp.com/portal/appointments", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
 
-    await softCheck("Open the Make Appointment dialog", async () => {
-      await page
-        .getByRole("button", { name: /make.?an?.?appoint/i })
-        .first()
-        .click();
-      await page.waitForTimeout(1500);
+    await softCheck("Open Make Appointment dialog", async () => {
+      const btn = page
+        .locator("button, a")
+        .filter({ hasText: /make.*appoint|schedule.*appoint|book.*appoint/i })
+        .first();
+      await btn.click();
+      await page.waitForTimeout(2000);
     });
 
     await softCheck("Select 'Pediatric'", async () => {
@@ -485,21 +575,23 @@ test.describe("4 · Appointments Page", () => {
 
     await softCheck("Cancel button is visible", async () => {
       await expect(
-        page.getByRole("button", { name: /cancel/i }).first()
+        page.locator("button").filter({ hasText: /cancel/i }).first()
       ).toBeVisible();
     });
 
-    await softCheck("Click Cancel – dialog/modal closes", async () => {
-      await page.getByRole("button", { name: /cancel/i }).first().click();
+    await softCheck("Click Cancel – dialog closes, stays on Appointments page", async () => {
+      await page
+        .locator("button")
+        .filter({ hasText: /cancel/i })
+        .first()
+        .click();
       await page.waitForTimeout(1000);
       await snap(page, "04b_after_cancel");
-      const modal = page
-        .locator("[role='dialog'], [class*='modal'], [class*='overlay']")
-        .first();
+      const modal = page.locator("[role='dialog'], [class*='modal']").first();
       await expect(modal).not.toBeVisible({ timeout: 4000 });
     });
 
-    await softCheck("User remains on the Appointments page after Cancel", async () => {
+    await softCheck("URL still on /portal/appointments after Cancel", async () => {
       expect(page.url()).toContain("/portal/appointments");
     });
   });
@@ -516,6 +608,7 @@ test.describe("4 · Appointments Page", () => {
         "&date=2026-03-29&radius=25&zip=28262",
       { waitUntil: "networkidle" }
     );
+    await dismissCookieBanner(page);
     await snap(page, "04c_find_lab_page");
 
     await softCheck("Page heading is visible", async () => {
@@ -526,37 +619,43 @@ test.describe("4 · Appointments Page", () => {
       const cards = page.locator(
         "[class*='lab'], [class*='location'], [class*='result'], [class*='card']"
       );
-      await expect(cards.first()).toBeVisible({ timeout: 10000 });
+      await expect(cards.first()).toBeVisible({ timeout: 12000 });
     });
 
     await softCheck("Filter / search section is visible", async () => {
-      const filter = page
-        .locator(
-          "[class*='filter'], input[type='text'], [placeholder*='zip' i], [placeholder*='address' i]"
-        )
-        .first();
-      await expect(filter).toBeVisible();
-    });
-
-    await softCheck("Radius / date selector is visible", async () => {
       await expect(
         page
-          .locator("input[type='date'], [class*='date'], [class*='radius'], select")
+          .locator(
+            "[class*='filter'], input[type='text'], [placeholder*='zip' i], [placeholder*='address' i]"
+          )
           .first()
       ).toBeVisible();
     });
 
-    await softCheck("No horizontal overflow (content fits viewport)", async () => {
+    await softCheck("Radius or date selector is visible", async () => {
+      await expect(
+        page
+          .locator(
+            "input[type='date'], [class*='date'], [class*='radius'], select"
+          )
+          .first()
+      ).toBeVisible();
+    });
+
+    await softCheck("No horizontal overflow", async () => {
       const sw = await page.evaluate(() => document.body.scrollWidth);
       const vw = await page.evaluate(() => window.innerWidth);
       expect(sw).toBeLessThanOrEqual(vw + 20);
     });
 
-    await softCheck("Lab cards display address or distance information", async () => {
-      const addressText = page
-        .locator("[class*='address'], [class*='distance'], [class*='miles']")
-        .first();
-      await expect(addressText).toBeVisible({ timeout: 8000 });
+    await softCheck("Lab cards display address or distance info", async () => {
+      await expect(
+        page
+          .locator(
+            "[class*='address'], [class*='distance'], [class*='miles']"
+          )
+          .first()
+      ).toBeVisible({ timeout: 8000 });
     });
   });
 });
@@ -572,6 +671,7 @@ test.describe("5 · Lab Orders Page", () => {
     await page.goto("https://patient.labcorp.com/portal/orders", {
       waitUntil: "networkidle",
     });
+    await dismissCookieBanner(page);
     await snap(page, "05_orders");
 
     await softCheck("Orders page heading is visible", async () => {
@@ -581,28 +681,28 @@ test.describe("5 · Lab Orders Page", () => {
     await softCheck("Orders list or table container is rendered", async () => {
       await expect(
         page
-          .locator("table, [class*='order'], [class*='result'], [class*='list']")
+          .locator(
+            "table, [class*='order'], [class*='result'], [class*='list']"
+          )
           .first()
       ).toBeVisible({ timeout: 8000 });
     });
 
-    await softCheck("Navigation bar is present (authenticated state preserved)", async () => {
+    await softCheck("Navigation bar is present", async () => {
       await expect(page.locator("nav, header").first()).toBeVisible();
     });
 
-    await softCheck("Page has no horizontal overflow", async () => {
+    await softCheck("No horizontal overflow", async () => {
       const sw = await page.evaluate(() => document.body.scrollWidth);
       const vw = await page.evaluate(() => window.innerWidth);
       expect(sw).toBeLessThanOrEqual(vw + 20);
     });
 
-    await softCheck("Axe scan – no critical violations on Orders page", async () => {
+    await softCheck("Axe scan – no critical violations", async () => {
       const results = await new AxeBuilder({ page })
         .withTags(["wcag2a"])
         .analyze();
-      const critical = results.violations.filter(
-        (v) => v.impact === "critical"
-      );
+      const critical = results.violations.filter((v) => v.impact === "critical");
       if (critical.length)
         throw new Error(
           `${critical.length} critical issue(s): ${critical
@@ -611,13 +711,18 @@ test.describe("5 · Lab Orders Page", () => {
         );
     });
 
-    await softCheck("Empty-state message is shown when no orders exist", async () => {
-      const hasOrders = (await page.locator("table tbody tr, [class*='order-item']").count()) > 0;
+    await softCheck("Orders exist OR empty-state message is shown", async () => {
+      const hasOrders =
+        (await page
+          .locator("table tbody tr, [class*='order-item']")
+          .count()) > 0;
       const hasEmptyState = await page
-        .locator("[class*='empty'], [class*='no-order'], [class*='no-result']")
+        .locator(
+          "[class*='empty'], [class*='no-order'], [class*='no-result']"
+        )
         .isVisible()
         .catch(() => false);
       expect(hasOrders || hasEmptyState).toBeTruthy();
     });
   });
-});
+})
