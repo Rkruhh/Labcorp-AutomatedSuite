@@ -514,16 +514,37 @@ test.describe("4 · Appointments Page", () => {
       await snap(page, "04a_make_appt_open");
     });
 
-    await softCheck("Reason / service selector appears", async () => {
+    await softCheck("Reason / service dropdown appears", async () => {
       const dropdown = page
-        .locator("select, [role='listbox'], [role='combobox']")
+        .locator("select, [role='listbox'], [role='combobox'], [class*='select'], [class*='dropdown']")
         .first();
       await expect(dropdown).toBeVisible({ timeout: 8000 });
     });
 
     await softCheck("Select 'Pediatric' from dropdown", async () => {
-      const select = page.locator("select").first();
-      await select.selectOption({ label: /pediatric/i });
+      // The dropdown is a custom component – click it to open, then click the option
+      const trigger = page
+        .locator("[role='combobox'], [class*='select'], [class*='dropdown']")
+        .filter({ hasText: /select a service|reason|service/i })
+        .first();
+
+      // Fallback: if trigger not found by text, just click the first combobox
+      const triggerVisible = await trigger.isVisible({ timeout: 3000 }).catch(() => false);
+      if (triggerVisible) {
+        await trigger.click();
+      } else {
+        await page.locator("[role='combobox'], [class*='select__control'], [class*='dropdown']").first().click();
+      }
+
+      await page.waitForTimeout(800);
+
+      // Click the "Pediatric" option from the open list
+      const pediatricOption = page
+        .locator("[role='option'], [class*='option'], li")
+        .filter({ hasText: /^pediatric$/i })
+        .first();
+      await pediatricOption.waitFor({ state: "visible", timeout: 6000 });
+      await pediatricOption.click();
       await page.waitForTimeout(500);
     });
 
@@ -570,7 +591,19 @@ test.describe("4 · Appointments Page", () => {
     });
 
     await softCheck("Select 'Pediatric'", async () => {
-      await page.locator("select").first().selectOption({ label: /pediatric/i });
+      // Open the custom dropdown
+      await page
+        .locator("[role='combobox'], [class*='select__control'], [class*='dropdown']")
+        .first()
+        .click();
+      await page.waitForTimeout(800);
+      // Click Pediatric option from the open list
+      await page
+        .locator("[role='option'], [class*='option'], li")
+        .filter({ hasText: /^pediatric$/i })
+        .first()
+        .click();
+      await page.waitForTimeout(500);
     });
 
     await softCheck("Cancel button is visible", async () => {
@@ -725,4 +758,4 @@ test.describe("5 · Lab Orders Page", () => {
       expect(hasOrders || hasEmptyState).toBeTruthy();
     });
   });
-})
+});
